@@ -252,7 +252,7 @@ async Task<IEnumerable<Playlist>> GetPlaylist(int id = -1)
     }
     else
     {
-        query = @$"SELECT p.name, p.id, p.name, p.thumbnailpath, p.description p.ispublic, p.creationdate, COUNT(s.id) AS songCount
+        query = @$"SELECT p.name, p.id, p.name, p.thumbnailpath, p.description, p.ispublic, p.creationdate, COUNT(s.id) AS songCount
                   FROM playlistsong ps
                   INNER JOIN playlist p ON p.id = ps.playlistid
                   INNER JOIN song s ON s.id = ps.songid
