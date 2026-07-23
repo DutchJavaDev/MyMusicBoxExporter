@@ -111,7 +111,7 @@ foreach (var playlist in playslists)
         var rawBeatId = await InsertRawBeat(song);
 
         // Insert beat
-        var beatId = await InsertBeat(song, rawBeatId, thumbnailPathSong, audioPublicUrl);
+        var beatId = await InsertBeat(song, rawBeatId, imagePublicUrl, audioPublicUrl);
 
         // inser beatmixbeat
         var beatmixbeat = await InsertBeatMixBeat(beatId, beatMixId);
