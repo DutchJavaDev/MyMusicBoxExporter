@@ -141,6 +141,13 @@ async Task<int> InsertBeatMixBeat(int beatId, int rawbeatId)
 
 async Task<int> InsertBeat(Song song,int rawBeatId, string thumbnailPublicUrl, string audioPublicUrl) 
 {
+    var exisitngBeat = supabase.From<Beat>().Where(i => i.rawbeatid == rawBeatId).Single();
+
+    if (exisitngBeat.Result != null)
+    {
+        return exisitngBeat.Result.id;
+    }
+
     var beat = new Beat
     {
         thumbnailurl = thumbnailPublicUrl,
@@ -165,11 +172,20 @@ async Task<int> InsertBeat(Song song,int rawBeatId, string thumbnailPublicUrl, s
 
 async Task<int> InsertRawBeat(Song song)
 {
+    var audioLocation = $"audio-files/{song.sourceid}.opus";
+
+    var existingRawBeat = supabase.From<RawBeat>().Where(i => i.AudioLocation == audioLocation).Single();
+
+    if (existingRawBeat.Result != null)
+    {
+        return existingRawBeat.Result.Id;
+    }
+
     var rawBeat = new RawBeat
     {
         Source = $"https://www.youtube.com/watch?v={song.sourceid}",
         Thumbnaillocation = $"image-files/{song.thumbnailpath}",
-        AudioLocation = $"audio-files/{song.sourceid}.opus",
+        AudioLocation = audioLocation,
         Duration = song.duration,
         Createddate = song.createdat,
     };
