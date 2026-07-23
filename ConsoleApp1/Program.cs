@@ -149,6 +149,7 @@ async Task<int> InsertBeat(Song song,int rawBeatId, string thumbnailPublicUrl, s
         // Fix missing url path instead of filesystem path
         if(exisitngBeat.Result.thumbnailurl.Contains("/home/admin/mymusicbox_production/"))
         {
+            // GRANT UPDATE ON librebeats.beat TO service_role
             var nBeat = exisitngBeat.Result;
 
             nBeat.thumbnailurl = thumbnailPublicUrl;
