@@ -145,6 +145,18 @@ async Task<int> InsertBeat(Song song,int rawBeatId, string thumbnailPublicUrl, s
 
     if (exisitngBeat.Result != null)
     {
+
+        // Fix missing url path instead of filesystem path
+        if(exisitngBeat.Result.thumbnailurl.Contains("/home/admin/mymusicbox_production/"))
+        {
+            var nBeat = exisitngBeat.Result;
+
+            nBeat.thumbnailurl = thumbnailPublicUrl;
+            
+            await supabase.From<Beat>().Upsert(nBeat, options: new Supabase.Postgrest.QueryOptions { Returning = Supabase.Postgrest.QueryOptions.ReturnType.Representation });
+        }
+
+
         return exisitngBeat.Result.id;
     }
 
