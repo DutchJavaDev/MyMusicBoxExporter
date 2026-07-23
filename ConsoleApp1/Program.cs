@@ -153,7 +153,7 @@ async Task<int> InsertBeat(Song song,int rawBeatId, string thumbnailPublicUrl, s
 
             nBeat.thumbnailurl = thumbnailPublicUrl;
             
-            await supabase.From<Beat>().Upsert(nBeat, options: new Supabase.Postgrest.QueryOptions { Returning = Supabase.Postgrest.QueryOptions.ReturnType.Representation });
+            await supabase.From<Beat>().Update(nBeat, options: new Supabase.Postgrest.QueryOptions { Returning = Supabase.Postgrest.QueryOptions.ReturnType.Representation });
         }
 
 
