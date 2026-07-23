@@ -48,6 +48,8 @@ foreach (var playlist in playslists)
 
     var existingBeatMix = supabase.From<BeatMix>().Where(i => i.Title == playlist.name).Single();
 
+    int beatMixId = 0;
+
     // Insert new beatmix
     if (existingBeatMix.Result == null)
     {
@@ -71,12 +73,18 @@ foreach (var playlist in playslists)
                 Console.WriteLine(insertResultBeatMix.Content);
                 continue;
             }
+
+            beatMixId = insertResultBeatMix.Models.First().Id;
         }
         catch (Exception e)
         {
             Console.WriteLine(e);
             continue;
         }
+    }
+    else 
+    {
+        beatMixId = existingBeatMix.Result.Id;
     }
 
     // Get songs
@@ -106,7 +114,7 @@ foreach (var playlist in playslists)
         var beatId = await InsertBeat(song, rawBeatId, thumbnailPathSong, audioPublicUrl);
 
         // inser beatmixbeat
-        var beatmixbeat = await InsertBeatMixBeat(beatId, rawBeatId);
+        var beatmixbeat = await InsertBeatMixBeat(beatId, beatMixId);
     }
 
 }
