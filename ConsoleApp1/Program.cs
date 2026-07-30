@@ -3,16 +3,49 @@ using Dapper;
 using Exporter.Data;
 using Supabase.Postgrest.Responses;
 
-
 // Export data based on max size for a playlist
 // Example: max 500MB, keep uploading until you have reached 500mb in audio/image files
-// Args: playlistid 1 totalsize 500 dbconnection db supabaseurl url supabasesecretkey key
+// Args example: 1 500 db url key
 
-var playListsId = int.Parse(args[0]);
-var totalSizeInMb = long.Parse(args[1]);
+if (args.Length == 0)
+{
+    throw new ArgumentException("No argments");
+}
+
+var hasPlaylistsId = int.TryParse(args[0], out var playListsId);
+var hasTotalSize = long.TryParse(args[1], out var totalSizeInMb);
+
+
+if (!hasPlaylistsId)
+{
+    // All playlists
+    playListsId = -1;
+}
+
+if(!hasTotalSize)
+{
+    throw new ArgumentException($"{nameof(hasTotalSize)} is not in the argument list");
+}
+
+if (string.IsNullOrEmpty(args[2]))
+{
+    throw new ArgumentException("Missing database connectionstring");
+}
+
+if (string.IsNullOrEmpty(args[3]))
+{
+    throw new ArgumentException("Missing supabase Url");
+}
+
+if (string.IsNullOrEmpty(args[4]))
+{
+    throw new ArgumentException("Missing supabase published key");
+}
+
 var databaseString = args[2];
 var supabaseUrl = args[3];
 var supabaseKey = args[4];
+
 var basePathImages = @"/home/admin/mymusicbox_production/music/images";
 var basePathAudos = @"/home/admin/mymusicbox_production/";
 
@@ -21,8 +54,9 @@ var playslists = (await GetPlaylist(playListsId > 0 ? playListsId : -1)).ToList(
 
 var options = new Supabase.SupabaseOptions
 {
-    Schema = "librebeats"
+    Schema = "librebeats",
 };
+
 var client = new Supabase.Client(supabaseUrl, supabaseKey, options);
 
 var supabase = await client.InitializeAsync();
@@ -300,5 +334,5 @@ async Task<IEnumerable<Playlist>> GetPlaylist(int id = -1)
     }
     await conn.OpenAsync();
 
-    return await conn.QueryAsync<Playlist>(query); ;
+    return await conn.QueryAsync<Playlist>(query);
 }
