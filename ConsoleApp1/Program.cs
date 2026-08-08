@@ -13,7 +13,8 @@ using RectangularPolygon = SixLabors.ImageSharp.Drawing.RectangularPolygon;
 // Export data based on max size for a playlist
 // Example: max 500MB, keep uploading until you have reached 500mb in audio/image files
 // Args example: 1 500 db url key [startSongId]
-// Optional 6th arg: source song id to resume from — songs with a lower id are skipped
+// Optional 6th arg: source song id to start from. Omit it to auto-resume each playlist
+// from export-progress.json (tracked per supabase url); pass 0 to start from the beginning.
 
 
 //GRANT SELECT, INSERT ON librebeats.beat TO service_role;
@@ -60,17 +61,19 @@ var databaseString = args[2];
 var supabaseUrl = args[3];
 var supabaseKey = args[4];
 
-// Optional: resume from this song id onwards, everything with a lower id is skipped
-var startSongId = 0;
+// Optional explicit start song id. Omitted -> each playlist auto-resumes from the
+// progress file; 0 -> start from the beginning; > 0 -> start there for every playlist.
+int? startSongIdArg = null;
 
-if (args.Length > 5 && !int.TryParse(args[5], out startSongId))
+if (args.Length > 5)
 {
-    throw new ArgumentException($"Invalid start song id: {args[5]}");
-}
+    if (!int.TryParse(args[5], out var parsedStartSongId))
+    {
+        throw new ArgumentException($"Invalid start song id: {args[5]}");
+    }
 
-if (startSongId > 0)
-{
-    Console.WriteLine($"Resuming from song id {startSongId}");
+    startSongIdArg = parsedStartSongId;
+    Console.WriteLine($"Explicit start song id {parsedStartSongId}, progress file will not be used for resuming");
 }
 
 var basePathImages = @"/home/admin/mymusicbox_production/music/images";
@@ -90,6 +93,12 @@ var supabase = await client.InitializeAsync();
 
 // Public url of the skeleton placeholder thumbnail, uploaded once on first use
 string? defaultThumbnailUrl = null;
+
+// Progress is tracked per supabase url, per playlist, in a json file next to the tool
+var progressFilePath = Path.Combine(Environment.CurrentDirectory, "export-progress.json");
+var progressUrlKey = supabaseUrl.Trim().TrimEnd('/').ToLowerInvariant();
+var jsonOptions = new System.Text.Json.JsonSerializerOptions { WriteIndented = true };
+var exportProgress = LoadProgress();
 
 foreach (var playlist in playslists)
 {
@@ -155,8 +164,48 @@ foreach (var playlist in playslists)
         beatMixId = existingBeatMix.Id;
     }
 
+    var playlistId = playlist.id ?? playListsId;
+
+    if (!exportProgress.TryGetValue(progressUrlKey, out var urlProgress))
+    {
+        urlProgress = new Dictionary<int, PlaylistProgress>();
+        exportProgress[progressUrlKey] = urlProgress;
+    }
+
+    urlProgress.TryGetValue(playlistId, out var playlistProgress);
+
+    int startSongId;
+
+    if (startSongIdArg.HasValue)
+    {
+        startSongId = startSongIdArg.Value;
+    }
+    else if (playlistProgress != null)
+    {
+        startSongId = playlistProgress.LastSongId + 1;
+        Console.WriteLine($"Resuming playlist {playlist.name} from song id {startSongId} (tracked in export-progress.json)");
+    }
+    else
+    {
+        startSongId = 0;
+    }
+
     // Get songs
-    var songs = await GetSongs(playlist.id ?? playListsId, totalSizeInMb, startSongId);
+    var songs = await GetSongs(playlistId, totalSizeInMb, startSongId);
+
+    if (playlistProgress == null)
+    {
+        playlistProgress = new PlaylistProgress();
+        urlProgress[playlistId] = playlistProgress;
+    }
+
+    playlistProgress.PlaylistName = playlist.name;
+    playlistProgress.BeatMixId = beatMixId;
+    playlistProgress.FailedSongIds = new List<int>();
+
+    // The pointer only advances through contiguous successes: once a song fails it
+    // holds, so the next auto-resume retries the failure (re-covered songs are idempotent)
+    var pointerBlocked = false;
 
     foreach (Song song in songs)
     {
@@ -187,14 +236,59 @@ foreach (var playlist in playslists)
 
             // Insert beatmixbeat
             await InsertBeatMixBeat(beatId, beatMixId);
+
+            if (!pointerBlocked && song.id > playlistProgress.LastSongId)
+            {
+                playlistProgress.LastSongId = song.id;
+                playlistProgress.LastSongTitle = song.title;
+            }
+
+            playlistProgress.UpdatedAtUtc = DateTime.UtcNow;
+            SaveProgress();
         }
         catch (Exception e)
         {
             Console.WriteLine($"Failed to process song {song.id}: {song.title}");
             Console.WriteLine(e);
+
+            pointerBlocked = true;
+            playlistProgress.FailedSongIds.Add(song.id);
+            playlistProgress.UpdatedAtUtc = DateTime.UtcNow;
+            SaveProgress();
         }
     }
 
+}
+
+Dictionary<string, Dictionary<int, PlaylistProgress>> LoadProgress()
+{
+    if (!File.Exists(progressFilePath))
+    {
+        return new Dictionary<string, Dictionary<int, PlaylistProgress>>();
+    }
+
+    try
+    {
+        var json = File.ReadAllText(progressFilePath);
+
+        return System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, Dictionary<int, PlaylistProgress>>>(json, jsonOptions)
+               ?? new Dictionary<string, Dictionary<int, PlaylistProgress>>();
+    }
+    catch (System.Text.Json.JsonException e)
+    {
+        // Do not silently reset progress: fix or delete the file explicitly
+        throw new InvalidOperationException($"Progress file {progressFilePath} is corrupt, fix or delete it before rerunning", e);
+    }
+}
+
+// Write-to-temp + rename so a crash mid-write can never corrupt the progress file
+void SaveProgress()
+{
+    var json = System.Text.Json.JsonSerializer.Serialize(exportProgress, jsonOptions);
+    var tempPath = progressFilePath + ".tmp";
+
+    File.WriteAllText(tempPath, json);
+    File.Move(tempPath, progressFilePath, overwrite: true);
 }
 
 // Uploads a skeleton-screen style placeholder (gray blocks with a shimmer highlight,
