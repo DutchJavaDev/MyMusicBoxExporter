@@ -7,6 +7,12 @@ using Supabase.Postgrest.Responses;
 // Example: max 500MB, keep uploading until you have reached 500mb in audio/image files
 // Args example: 1 500 db url key
 
+
+//GRANT SELECT, INSERT ON librebeats.beat TO service_role;
+//GRANT SELECT, INSERT ON librebeats.beatmix TO service_role;
+//GRANT SELECT, INSERT ON librebeats.beatmixbeat TO service_role;
+//GRANT SELECT, INSERT ON librebeats.rawbeat TO service_role;
+
 if (args.Length == 0)
 {
     throw new ArgumentException("No argments");
@@ -60,6 +66,7 @@ var options = new Supabase.SupabaseOptions
 var client = new Supabase.Client(supabaseUrl, supabaseKey, options);
 
 var supabase = await client.InitializeAsync();
+
 
 foreach (var playlist in playslists)
 {
