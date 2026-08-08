@@ -1,11 +1,19 @@
 ﻿using Npgsql;
 using Dapper;
 using Exporter.Data;
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Drawing.Processing;
+using SixLabors.ImageSharp.Formats.Jpeg;
+using SixLabors.ImageSharp.PixelFormats;
+using SixLabors.ImageSharp.Processing;
 using Supabase.Postgrest.Responses;
+using EllipsePolygon = SixLabors.ImageSharp.Drawing.EllipsePolygon;
+using RectangularPolygon = SixLabors.ImageSharp.Drawing.RectangularPolygon;
 
 // Export data based on max size for a playlist
 // Example: max 500MB, keep uploading until you have reached 500mb in audio/image files
-// Args example: 1 500 db url key
+// Args example: 1 500 db url key [startSongId]
+// Optional 6th arg: source song id to resume from — songs with a lower id are skipped
 
 
 //GRANT SELECT, INSERT ON librebeats.beat TO service_role;
@@ -13,9 +21,9 @@ using Supabase.Postgrest.Responses;
 //GRANT SELECT, INSERT ON librebeats.beatmixbeat TO service_role;
 //GRANT SELECT, INSERT ON librebeats.rawbeat TO service_role;
 
-if (args.Length == 0)
+if (args.Length < 5)
 {
-    throw new ArgumentException("No argments");
+    throw new ArgumentException("Usage: <playlistId|all> <maxSizeInMb> <connectionString> <supabaseUrl> <supabaseKey> [startSongId]");
 }
 
 var hasPlaylistsId = int.TryParse(args[0], out var playListsId);
@@ -30,7 +38,7 @@ if (!hasPlaylistsId)
 
 if(!hasTotalSize)
 {
-    throw new ArgumentException($"{nameof(hasTotalSize)} is not in the argument list");
+    throw new ArgumentException($"Invalid max size in MB: {args[1]}");
 }
 
 if (string.IsNullOrEmpty(args[2]))
@@ -52,6 +60,19 @@ var databaseString = args[2];
 var supabaseUrl = args[3];
 var supabaseKey = args[4];
 
+// Optional: resume from this song id onwards, everything with a lower id is skipped
+var startSongId = 0;
+
+if (args.Length > 5 && !int.TryParse(args[5], out startSongId))
+{
+    throw new ArgumentException($"Invalid start song id: {args[5]}");
+}
+
+if (startSongId > 0)
+{
+    Console.WriteLine($"Resuming from song id {startSongId}");
+}
+
 var basePathImages = @"/home/admin/mymusicbox_production/music/images";
 var basePathAudos = @"/home/admin/mymusicbox_production/";
 
@@ -67,32 +88,38 @@ var client = new Supabase.Client(supabaseUrl, supabaseKey, options);
 
 var supabase = await client.InitializeAsync();
 
+// Public url of the skeleton placeholder thumbnail, uploaded once on first use
+string? defaultThumbnailUrl = null;
 
 foreach (var playlist in playslists)
 {
-    // Get thumbnail
-    var thumbnailPath = Path.Combine(basePathImages, playlist.thumbnailpath);
+    string publicUrl;
 
-    if (!File.Exists(thumbnailPath))
+    var thumbnailPath = string.IsNullOrEmpty(playlist.thumbnailpath)
+        ? null
+        : Path.Combine(basePathImages, playlist.thumbnailpath);
+
+    if (thumbnailPath == null || !File.Exists(thumbnailPath))
     {
-        Console.WriteLine($"Unable to find thumbnail for playlist {playlist.name} at location {thumbnailPath}");
-        Console.WriteLine("Skipping");
-        continue;
+        Console.WriteLine($"No thumbnail found for playlist {playlist.name}, using default skeleton thumbnail");
+        publicUrl = await GetDefaultThumbnailUrl();
     }
+    else
+    {
+        // Upload thumbnail
+        var thumbnailUploadResult = await supabase.Storage.From("image-files").Upload(thumbnailPath, playlist.thumbnailpath, new Supabase.Storage.FileOptions { ContentType = "image/jpeg", Upsert = true });
 
-    // Upload thumbnail
-    var uploadResult = await supabase.Storage.From("image-files").Upload(thumbnailPath, playlist.thumbnailpath, new Supabase.Storage.FileOptions { ContentType = "image/jpeg", Upsert = true });
-
-    var publicUrl = supabase.Storage.From("image-files").GetPublicUrl(uploadResult.Split("image-files/")[1]);
+        publicUrl = supabase.Storage.From("image-files").GetPublicUrl(thumbnailUploadResult.Split("image-files/")[1]);
+    }
 
     // Insert beatmix
 
-    var existingBeatMix = supabase.From<BeatMix>().Where(i => i.Title == playlist.name).Single();
+    var existingBeatMix = await supabase.From<BeatMix>().Where(i => i.Title == playlist.name).Single();
 
     int beatMixId = 0;
 
     // Insert new beatmix
-    if (existingBeatMix.Result == null)
+    if (existingBeatMix == null)
     {
         var beatMix = new BeatMix()
         {
@@ -123,58 +150,135 @@ foreach (var playlist in playslists)
             continue;
         }
     }
-    else 
+    else
     {
-        beatMixId = existingBeatMix.Result.Id;
+        beatMixId = existingBeatMix.Id;
     }
 
     // Get songs
-    var songs = await GetSongs(playListsId, totalSizeInMb);
+    var songs = await GetSongs(playlist.id ?? playListsId, totalSizeInMb, startSongId);
 
-    foreach (Song song in songs) 
+    foreach (Song song in songs)
     {
-        var thumbnailPathSong = Path.Combine(basePathImages, song.thumbnailpath);
-        var audioPath = Path.Combine(basePathAudos, song.path);
+        try
+        {
+            Console.WriteLine($"Uploading song {song.id}: {song.title}");
 
-        // Upload
-        uploadResult = await supabase.Storage.From("image-files").Upload(thumbnailPathSong, song.thumbnailpath, new Supabase.Storage.FileOptions { ContentType = "image/jpeg", Upsert = true });
+            var thumbnailPathSong = Path.Combine(basePathImages, song.thumbnailpath);
+            var audioPath = Path.Combine(basePathAudos, song.path);
 
-        // Retrieve public url
-        var imagePublicUrl = supabase.Storage.From("image-files").GetPublicUrl(uploadResult.Split("image-files/")[1]);
+            // Upload
+            var uploadResult = await supabase.Storage.From("image-files").Upload(thumbnailPathSong, song.thumbnailpath, new Supabase.Storage.FileOptions { ContentType = "image/jpeg", Upsert = true });
 
-        // Upload
-        uploadResult = await supabase.Storage.From("audio-files").Upload(audioPath, song.path.Split("music/")[1], new Supabase.Storage.FileOptions { ContentType = "audio/ogg", Upsert = true });
+            // Retrieve public url
+            var imagePublicUrl = supabase.Storage.From("image-files").GetPublicUrl(uploadResult.Split("image-files/")[1]);
 
-        // Retrieve public url
-        var audioPublicUrl = supabase.Storage.From("audio-files").GetPublicUrl(uploadResult.Split("audio-files/")[1]);
+            // Upload
+            uploadResult = await supabase.Storage.From("audio-files").Upload(audioPath, song.path.Split("music/")[1], new Supabase.Storage.FileOptions { ContentType = "audio/ogg", Upsert = true });
 
-        // Insert rawbeat
-        var rawBeatId = await InsertRawBeat(song);
+            // Retrieve public url
+            var audioPublicUrl = supabase.Storage.From("audio-files").GetPublicUrl(uploadResult.Split("audio-files/")[1]);
 
-        // Insert beat
-        var beatId = await InsertBeat(song, rawBeatId, imagePublicUrl, audioPublicUrl);
+            // Insert rawbeat
+            var rawBeatId = await InsertRawBeat(song);
 
-        // inser beatmixbeat
-        var beatmixbeat = await InsertBeatMixBeat(beatId, beatMixId);
+            // Insert beat
+            var beatId = await InsertBeat(song, rawBeatId, imagePublicUrl, audioPublicUrl);
+
+            // Insert beatmixbeat
+            await InsertBeatMixBeat(beatId, beatMixId);
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine($"Failed to process song {song.id}: {song.title}");
+            Console.WriteLine(e);
+        }
     }
 
 }
 
-async Task<int> InsertBeatMixBeat(int beatId, int rawbeatId)
+// Uploads a skeleton-screen style placeholder (gray blocks with a shimmer highlight,
+// like web lazy-loading skeletons) as a jpeg and returns its public url. Uploaded once per run.
+async Task<string> GetDefaultThumbnailUrl()
 {
+    if (defaultThumbnailUrl != null)
+    {
+        return defaultThumbnailUrl;
+    }
+
+    var uploadResult = await supabase.Storage.From("image-files").Upload(
+        CreateSkeletonThumbnailJpeg(),
+        "defaults/playlist-skeleton.jpg",
+        new Supabase.Storage.FileOptions { ContentType = "image/jpeg", Upsert = true });
+
+    defaultThumbnailUrl = supabase.Storage.From("image-files").GetPublicUrl(uploadResult.Split("image-files/")[1]);
+
+    return defaultThumbnailUrl;
+}
+
+static byte[] CreateSkeletonThumbnailJpeg()
+{
+    const int size = 512;
+
+    // Skeleton blocks are lit by a diagonal shimmer highlight, frozen mid-sweep
+    var shimmer = new LinearGradientBrush(
+        new PointF(0, 0),
+        new PointF(size, size),
+        GradientRepetitionMode.None,
+        new ColorStop(0f, Color.ParseHex("e2e5e9")),
+        new ColorStop(0.45f, Color.ParseHex("f4f6f8")),
+        new ColorStop(0.55f, Color.ParseHex("f4f6f8")),
+        new ColorStop(1f, Color.ParseHex("e2e5e9")));
+
+    using var image = new Image<Rgb24>(size, size);
+
+    image.Mutate(ctx =>
+    {
+        ctx.Fill(Color.ParseHex("eceef1"));
+        FillRoundedRect(ctx, shimmer, 32, 32, 448, 288, 16);
+        FillRoundedRect(ctx, shimmer, 32, 352, 320, 28, 14);
+        FillRoundedRect(ctx, shimmer, 32, 400, 240, 28, 14);
+        FillRoundedRect(ctx, shimmer, 32, 448, 160, 28, 14);
+    });
+
+    using var stream = new MemoryStream();
+    image.Save(stream, new JpegEncoder { Quality = 90 });
+
+    return stream.ToArray();
+}
+
+// Rounded rectangle as a union of two rectangles and four corner circles
+static void FillRoundedRect(IImageProcessingContext ctx, Brush brush, float x, float y, float w, float h, float r)
+{
+    ctx.Fill(brush, new RectangularPolygon(x + r, y, w - 2 * r, h));
+    ctx.Fill(brush, new RectangularPolygon(x, y + r, w, h - 2 * r));
+    ctx.Fill(brush, new EllipsePolygon(x + r, y + r, r));
+    ctx.Fill(brush, new EllipsePolygon(x + w - r, y + r, r));
+    ctx.Fill(brush, new EllipsePolygon(x + r, y + h - r, r));
+    ctx.Fill(brush, new EllipsePolygon(x + w - r, y + h - r, r));
+}
+
+async Task<int> InsertBeatMixBeat(int beatId, int beatMixId)
+{
+    // Already linked (e.g. resuming a previous run), the composite PK would reject a duplicate
+    var existing = await supabase.From<BeatMixBeat>().Where(i => i.Beatid == beatId && i.Beatmixid == beatMixId).Get();
+
+    if (existing.Models.Count > 0)
+    {
+        return existing.Models.First().Beatmixid;
+    }
+
     var beatmix = new BeatMixBeat
     {
         Beatid = beatId,
-        Beatmixid = rawbeatId
+        Beatmixid = beatMixId
     };
 
     var insertResultBeatMixBeat = await supabase.From<BeatMixBeat>().Insert(beatmix, options: new Supabase.Postgrest.QueryOptions { Returning = Supabase.Postgrest.QueryOptions.ReturnType.Representation });
 
     if (insertResultBeatMixBeat.ResponseMessage.StatusCode != System.Net.HttpStatusCode.Created)
     {
-        Console.WriteLine("Failed to insert BeatMixBeat");
-        Console.WriteLine(insertResultBeatMixBeat.Content);
-
+        throw new Exception($"Failed to insert BeatMixBeat: {insertResultBeatMixBeat.Content}");
     }
 
     return insertResultBeatMixBeat.Models.First().Beatmixid;
@@ -182,24 +286,20 @@ async Task<int> InsertBeatMixBeat(int beatId, int rawbeatId)
 
 async Task<int> InsertBeat(Song song,int rawBeatId, string thumbnailPublicUrl, string audioPublicUrl) 
 {
-    var exisitngBeat = supabase.From<Beat>().Where(i => i.rawbeatid == rawBeatId).Single();
+    var existingBeat = await supabase.From<Beat>().Where(i => i.rawbeatid == rawBeatId).Single();
 
-    if (exisitngBeat.Result != null)
+    if (existingBeat != null)
     {
-
         // Fix missing url path instead of filesystem path
-        if(exisitngBeat.Result.thumbnailurl.Contains("/home/admin/mymusicbox_production/"))
+        if (existingBeat.thumbnailurl.Contains("/home/admin/mymusicbox_production/"))
         {
             // GRANT UPDATE ON librebeats.beat TO service_role
-            var nBeat = exisitngBeat.Result;
+            existingBeat.thumbnailurl = thumbnailPublicUrl;
 
-            nBeat.thumbnailurl = thumbnailPublicUrl;
-            
-            await supabase.From<Beat>().Update(nBeat, options: new Supabase.Postgrest.QueryOptions { Returning = Supabase.Postgrest.QueryOptions.ReturnType.Representation });
+            await supabase.From<Beat>().Update(existingBeat, options: new Supabase.Postgrest.QueryOptions { Returning = Supabase.Postgrest.QueryOptions.ReturnType.Representation });
         }
 
-
-        return exisitngBeat.Result.id;
+        return existingBeat.id;
     }
 
     var beat = new Beat
@@ -217,8 +317,7 @@ async Task<int> InsertBeat(Song song,int rawBeatId, string thumbnailPublicUrl, s
 
     if (insertResultBeat.ResponseMessage.StatusCode != System.Net.HttpStatusCode.Created)
     {
-        Console.WriteLine("Failed to insert Beat");
-        Console.WriteLine(insertResultBeat.Content);
+        throw new Exception($"Failed to insert Beat: {insertResultBeat.Content}");
     }
 
     return insertResultBeat.Models.First().id;
@@ -228,11 +327,11 @@ async Task<int> InsertRawBeat(Song song)
 {
     var audioLocation = $"audio-files/{song.sourceid}.opus";
 
-    var existingRawBeat = supabase.From<RawBeat>().Where(i => i.AudioLocation == audioLocation).Single();
+    var existingRawBeat = await supabase.From<RawBeat>().Where(i => i.AudioLocation == audioLocation).Single();
 
-    if (existingRawBeat.Result != null)
+    if (existingRawBeat != null)
     {
-        return existingRawBeat.Result.Id;
+        return existingRawBeat.Id;
     }
 
     var rawBeat = new RawBeat
@@ -249,27 +348,27 @@ async Task<int> InsertRawBeat(Song song)
 
     if (insertResultRawBeat.ResponseMessage.StatusCode != System.Net.HttpStatusCode.Created)
     {
-        Console.WriteLine("Failed to insert rawbeat");
-        Console.WriteLine(insertResultRawBeat.Content);
+        throw new Exception($"Failed to insert RawBeat: {insertResultRawBeat.Content}");
     }
 
     return insertResultRawBeat.Models.First().Id;
 }
 
-async Task<IEnumerable<Song>> GetSongs(int playlistId, long maxSizeInMb, long maxFileSizeInMb = 50) 
+async Task<IEnumerable<Song>> GetSongs(int playlistId, long maxSizeInMb, int startSongId = 0, long maxFileSizeInMb = 50)
 {
     var maxBytes = maxSizeInMb * 1024 * 1024 / playslists.Count;
     var maxFileBytes = maxFileSizeInMb * 1024 * 1024;
     long currentBytes = 0;
     var allowedSongs = new List<Song>();
-    var query = @$"SELECT s.name as title, s.path, s.thumbnailpath, s.duration, s.sourceid, s.createdat FROM song s
+    var query = @"SELECT s.id, s.name as title, s.path, s.thumbnailpath, s.duration, s.sourceid, s.createdat FROM song s
                    INNER JOIN playlistsong ps on ps.songid = s.id
-                   where ps.playlistid = {playlistId}";
+                   where ps.playlistid = @playlistId and s.id >= @startSongId
+                   order by s.id";
 
     await using var conn = new NpgsqlConnection(databaseString);
     await conn.OpenAsync();
 
-    var songs = await conn.QueryAsync<Song>(query);
+    var songs = await conn.QueryAsync<Song>(query, new { playlistId, startSongId });
 
     foreach (Song song in songs) 
     {
@@ -284,7 +383,7 @@ async Task<IEnumerable<Song>> GetSongs(int playlistId, long maxSizeInMb, long ma
 
         if (!File.Exists(audioPath))
         {
-            Console.WriteLine($"Could not find audio path for: {thumbnailPathSong}");
+            Console.WriteLine($"Could not find audio path for: {audioPath}");
             continue;
         }
 
@@ -292,7 +391,7 @@ async Task<IEnumerable<Song>> GetSongs(int playlistId, long maxSizeInMb, long ma
 
         if (totalBytes > maxFileBytes) 
         {
-            Console.WriteLine($"Song {song.title} exceeds 50mb limit, skipping");
+            Console.WriteLine($"Song {song.title} exceeds {maxFileSizeInMb}mb limit, skipping");
             continue;
         }
 
@@ -314,11 +413,11 @@ async Task<IEnumerable<Playlist>> GetPlaylist(int id = -1)
     await using var conn = new NpgsqlConnection(databaseString);
 
     string query;
-    
+
     if (id == -1)
     {
         // Get all playlist
-        query = @"SELECT p.name, p.id, p.name, p.thumbnailpath, p.description p.ispublic, p.creationdate, COUNT(s.id) AS songCount
+        query = @"SELECT p.name, p.id, p.thumbnailpath, p.description, p.ispublic, p.creationdate, COUNT(s.id) AS songCount
                   FROM playlistsong ps
                   INNER JOIN playlist p ON p.id = ps.playlistid
                   INNER JOIN song s ON s.id = ps.songid
@@ -330,16 +429,16 @@ async Task<IEnumerable<Playlist>> GetPlaylist(int id = -1)
     }
     else
     {
-        query = @$"SELECT p.name, p.id, p.name, p.thumbnailpath, p.description, p.ispublic, p.creationdate, COUNT(s.id) AS songCount
+        query = @"SELECT p.name, p.id, p.thumbnailpath, p.description, p.ispublic, p.creationdate, COUNT(s.id) AS songCount
                   FROM playlistsong ps
                   INNER JOIN playlist p ON p.id = ps.playlistid
                   INNER JOIN song s ON s.id = ps.songid
-                  WHERE p.id = {id}
+                  WHERE p.id = @id
                   GROUP BY p.name, p.id
                   ORDER BY songCount DESC, p.name;";
 
     }
     await conn.OpenAsync();
 
-    return await conn.QueryAsync<Playlist>(query);
+    return await conn.QueryAsync<Playlist>(query, new { id });
 }
